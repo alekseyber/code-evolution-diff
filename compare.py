@@ -122,8 +122,9 @@ def collect(root: str, ext: str, layers: Optional[Iterable[str]] = None) -> Dict
         roots.append((root, ""))
 
     for base, prefix in roots:
-        for cur, _, files in os.walk(base):
-            for name in files:
+        for cur, dirs, files in os.walk(base):
+            dirs.sort()
+            for name in sorted(files):
                 if not name.endswith(ext):
                     continue
                 path = os.path.join(cur, name)
@@ -176,7 +177,7 @@ def compare(baseline: Dict[str, FileInfo], target: Dict[str, FileInfo], threshol
     verdicts: List[Verdict] = []
 
     # 1) тот же путь и то же содержимое
-    for rel, info in target.items():
+    for rel, info in sorted(target.items()):
         base = baseline.get(rel)
         if base is not None and base.norm == info.norm:
             verdicts.append(Verdict(rel, "identical", 1.0, info.lines, rel))
@@ -184,11 +185,11 @@ def compare(baseline: Dict[str, FileInfo], target: Dict[str, FileInfo], threshol
             done.add(rel)
 
     # 2) то же содержимое под другим именем (переименование, перенос)
-    for rel, info in target.items():
+    for rel, info in sorted(target.items()):
         if rel in done:
             continue
         digest = hashlib.sha1(info.norm.encode("utf-8")).hexdigest()
-        candidates = [c for c in by_hash.get(digest, []) if c not in used]
+        candidates = sorted(c for c in by_hash.get(digest, []) if c not in used)
         if candidates:
             verdicts.append(Verdict(rel, "identical", 1.0, info.lines, candidates[0]))
             used.add(candidates[0])
@@ -204,7 +205,7 @@ def compare(baseline: Dict[str, FileInfo], target: Dict[str, FileInfo], threshol
             inverted[s].append(rel)
     max_postings = 40
 
-    for rel, info in target.items():
+    for rel, info in sorted(target.items()):
         if rel in done:
             continue
         mine = shingles(info.norm)
