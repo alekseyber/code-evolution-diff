@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
 DEFAULT_THRESHOLD = 0.30
+STRONG_THRESHOLD = 0.60  # совпадения такого уровня считаются переносом кода, а не случайностью
 
 # --------------------------------------------------------------------------
 # Нормализация
@@ -285,7 +286,8 @@ def pct(part: int, whole: int) -> str:
     return f"{100.0 * part / whole:.1f}%" if whole else "—"
 
 
-def render_markdown(groups: Dict[str, GroupResult], threshold: float) -> str:
+def render_markdown(groups: Dict[str, GroupResult], threshold: float,
+                    strong: float = STRONG_THRESHOLD) -> str:
     buf = io.StringIO()
     head = (f"| слой | база (файлы/строки) | цель (файлы/строки) | как есть | переработано | новое |\n"
             f"|---|---|---|---|---|---|\n")
@@ -308,6 +310,21 @@ def render_markdown(groups: Dict[str, GroupResult], threshold: float) -> str:
     buf.write(f"Порог сходства: {threshold}. В строках: как есть {pct(total.lines['identical'], total.target_lines)}, "
               f"переработано {pct(total.lines['modified'], total.target_lines)}, "
               f"новое {pct(total.lines['new'], total.target_lines)}.\n")
+
+    # Точечные переносы: агрегат по слоям их усредняет и прячет, а вопрос обычно
+    # именно про них — «что из старого кода реально перешло».
+    strong_hits = [(v.ratio, v.rel, v.source, v.lines)
+                   for gr in groups.values() for v in gr.verdicts
+                   if v.cls in ("modified", "identical") and v.ratio >= strong]
+    if strong_hits:
+        strong_hits.sort(reverse=True)
+        buf.write(f"\nСильные совпадения (сходство ≥ {strong:.2f}) — вероятный перенос кода:\n\n")
+        buf.write("| сходство | файл в цели | предок в базе | строк |\n|---|---|---|---|\n")
+        for ratio, rel, src, lines in strong_hits[:20]:
+            buf.write(f"| {ratio:.2f} | {rel} | {src or '—'} | {lines} |\n")
+        if len(strong_hits) > 20:
+            buf.write(f"\n… всего {len(strong_hits)} таких файлов.\n")
+        buf.write("\n")
     return buf.getvalue()
 
 
@@ -333,6 +350,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--ext", default=".php", help="расширение файлов, по умолчанию .php")
     parser.add_argument("--layers", default="", help="список слоёв через запятую; по умолчанию группировка по первому каталогу")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="порог сходства для класса modified")
+    parser.add_argument("--strong", type=float, default=STRONG_THRESHOLD,
+                        help="порог для блока «сильные совпадения» (по умолчанию 0.60)")
     parser.add_argument("--format", choices=["markdown", "csv"], default="markdown")
     parser.add_argument("--out", default="", help="файл для записи отчёта; по умолчанию stdout")
     args = parser.parse_args(argv)
@@ -349,9 +368,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Не найдено файлов с расширением %s — проверьте пути и --layers" % ext, file=sys.stderr)
         return 2
 
+    # --layers отсекает файлы С ОБЕИХ СТОРОН. Если у базовой версии другой набор
+    # каталогов (например, «core/lib/objects» против «app»), фильтр по слоям цели
+    # может оставить от базы один-два файла, и сравнение теряет смысл — оно
+    # покажет «новое» почти для всего. Предупреждаем, а не молчим.
+    if layers:
+        base_by_layer = {g: 0 for g in layers}
+        for rel in baseline:
+            base_by_layer[group_of(rel, layers)] = base_by_layer.get(group_of(rel, layers), 0) + 1
+        for layer, count in base_by_layer.items():
+            if count == 0:
+                print(
+                    "Предупреждение: в базовой версии нет файлов в слое %r — "
+                    "фильтр --layers применится к обеим сторонам, и это занизит совпадения. "
+                    "Уберите --layers или назовите слои одинаково в обеих версиях." % layer,
+                    file=sys.stderr,
+                )
+
     verdicts = compare(baseline, target, args.threshold)
     groups = aggregate(verdicts, baseline, target, layers)
-    report = render_markdown(groups, args.threshold) if args.format == "markdown" else render_csv(groups)
+    report = (render_markdown(groups, args.threshold, args.strong)
+              if args.format == "markdown" else render_csv(groups))
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
